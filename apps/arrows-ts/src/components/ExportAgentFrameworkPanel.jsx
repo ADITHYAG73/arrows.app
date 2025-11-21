@@ -67,6 +67,67 @@ class ExportAgentFrameworkPanel extends Component {
     return graph.relationships.some(rel => rel.type !== 'HAS_TOOL');
   };
 
+  // Check if a node is an agent (has outgoing HAS_TOOL relationships)
+  isNodeAnAgent = (nodeId) => {
+    const { graph } = this.props;
+    return graph.relationships.some(
+      rel => rel.type === 'HAS_TOOL' && rel.fromId === nodeId
+    );
+  };
+
+  // Transform a single tool node (handles both regular tools and nested agents)
+  transformToolNode = (toolNode, visitedNodes = new Set()) => {
+    // Circular reference protection
+    if (visitedNodes.has(toolNode.id)) {
+      console.warn(`Circular reference detected for node ${toolNode.id}, skipping nested tools`);
+      return {
+        name: (toolNode.caption || `tool_${toolNode.id}`).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '_'),
+        description: toolNode.properties?.description || 'A tool for the agent.',
+        type: 'agent',
+        error: 'Circular reference detected'
+      };
+    }
+
+    // Mark this node as visited
+    const newVisitedNodes = new Set(visitedNodes);
+    newVisitedNodes.add(toolNode.id);
+
+    // Extract properties
+    const { description, system_prompt, ...config } = toolNode.properties || {};
+
+    // Sanitize tool name
+    const sanitizedToolName = (toolNode.caption || `tool_${toolNode.id}`)
+      .replace(/\s+/g, '_')
+      .replace(/[^a-zA-Z0-9_]/g, '_');
+
+    // Check if this tool is actually an agent (has its own tools)
+    const isAgent = this.isNodeAnAgent(toolNode.id);
+
+    if (isAgent) {
+      // This tool is a nested agent - get its tools recursively
+      const nestedToolNodes = this.getToolNodesForAgent(toolNode.id);
+
+      return {
+        name: sanitizedToolName,
+        type: 'agent',
+        description: description || 'A nested agent.',
+        system_prompt: system_prompt || 'You are a helpful nested agent.',
+        tools: nestedToolNodes.map(nestedTool =>
+          this.transformToolNode(nestedTool, newVisitedNodes)
+        ),
+        config: Object.keys(config).length > 0 ? config : undefined
+      };
+    } else {
+      // Regular tool
+      return {
+        name: sanitizedToolName,
+        type: 'tool',
+        description: description || 'A tool for the agent.',
+        config: Object.keys(config).length > 0 ? config : undefined
+      };
+    }
+  };
+
   // Transform agent node + tool nodes to API format
   transformToAPIFormat = (agentNode, toolNodes) => {
     // Sanitize node_label: replace spaces and special chars with underscores
@@ -78,21 +139,7 @@ class ExportAgentFrameworkPanel extends Component {
       node_label: sanitizedLabel,
       system_prompt: agentNode.properties?.system_prompt || 'You are a helpful agent.',
       // model field removed - let backend use its own default
-      tools: toolNodes.map(toolNode => {
-        // Extract all properties except 'description' as config
-        const { description, ...config } = toolNode.properties || {};
-
-        // Sanitize tool name as well
-        const sanitizedToolName = (toolNode.caption || `tool_${toolNode.id}`)
-          .replace(/\s+/g, '_')
-          .replace(/[^a-zA-Z0-9_]/g, '_');
-
-        return {
-          name: sanitizedToolName,
-          description: description || 'A tool for the agent.',
-          config: Object.keys(config).length > 0 ? config : undefined
-        };
-      }),
+      tools: toolNodes.map(toolNode => this.transformToolNode(toolNode)),
       metadata: {
         created_by: 'arrows_user',
         created_from: 'arrows.app'
