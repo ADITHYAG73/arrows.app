@@ -1,5 +1,9 @@
 import React, { Component } from 'react';
 import { Modal, Form, Button, Icon, Message, Comment, Segment } from 'semantic-ui-react';
+import ReactMarkdown from 'react-markdown';
+import rehypeRaw from 'rehype-raw';
+import rehypeSanitize from 'rehype-sanitize';
+import remarkGfm from 'remark-gfm';
 
 class ChatInterface extends Component {
   constructor(props) {
@@ -409,8 +413,21 @@ class ChatInterface extends Component {
                           </div>
                         )}
                       </Comment.Metadata>
-                      <Comment.Text style={{ whiteSpace: 'pre-wrap' }}>
-                        {msg.content}
+                      <Comment.Text>
+                        {msg.role === 'user' ? (
+                          // User messages: plain text
+                          <div style={{ whiteSpace: 'pre-wrap' }}>
+                            {msg.content}
+                          </div>
+                        ) : (
+                          // Agent messages: markdown + HTML with sanitization
+                          <ReactMarkdown
+                            rehypePlugins={[rehypeRaw, rehypeSanitize]}
+                            remarkPlugins={[remarkGfm]}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
+                        )}
                       </Comment.Text>
 
                       {/* Trajectory Section */}
