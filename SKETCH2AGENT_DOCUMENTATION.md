@@ -295,6 +295,132 @@ Based on `sketch2agent-api-spec.md`, the frontend integrates with three endpoint
 }
 ```
 
+---
+
+### Nested Agents (Hierarchical Agent Support)
+
+**NEW FEATURE!** The frontend now supports nested agents - where a tool can itself be another agent with its own tools.
+
+#### Graph Structure Example
+
+```
+Main Agent ─[HAS_TOOL]→ Calculator Agent ─[HAS_TOOL]→ Add Tool
+                                        └─[HAS_TOOL]→ Multiply Tool
+           └─[HAS_TOOL]→ Regular Tool
+```
+
+In this structure:
+- **Main Agent** has two tools:
+  - **Calculator Agent** (nested agent with 2 tools)
+  - **Regular Tool** (simple tool)
+
+#### Nested Agent Request Format
+
+When you export "Main Agent", the request sent to backend includes the hierarchical structure:
+
+```json
+{
+  "node_label": "Main_Agent",
+  "system_prompt": "You are a main orchestrator agent.",
+  "tools": [
+    {
+      "name": "Calculator_Agent",
+      "type": "agent",
+      "description": "A calculator agent that can perform arithmetic.",
+      "system_prompt": "You are a calculator agent.",
+      "tools": [
+        {
+          "name": "Add_Tool",
+          "type": "tool",
+          "description": "Adds two numbers together",
+          "config": {}
+        },
+        {
+          "name": "Multiply_Tool",
+          "type": "tool",
+          "description": "Multiplies two numbers",
+          "config": {}
+        }
+      ],
+      "config": {}
+    },
+    {
+      "name": "Regular_Tool",
+      "type": "tool",
+      "description": "A regular tool",
+      "config": {
+        "api_key": "some_key"
+      }
+    }
+  ],
+  "metadata": {
+    "created_by": "arrows_user",
+    "created_from": "arrows.app"
+  }
+}
+```
+
+#### Tool Type Field
+
+Each tool now includes a `type` field:
+- **`"type": "tool"`** - Regular tool (no nested tools)
+- **`"type": "agent"`** - Nested agent (has its own `system_prompt` and `tools` array)
+
+#### Nested Agent Properties
+
+When a tool is marked as `type: "agent"`, it includes:
+- `name` - Agent name (sanitized)
+- `type` - Always `"agent"`
+- `description` - Agent description (from node properties)
+- `system_prompt` - Agent's system instructions (from node's `system_prompt` property)
+- `tools` - Array of the agent's tools (can be nested recursively)
+- `config` - Any additional properties from the node
+
+#### Circular Reference Protection
+
+The frontend detects and prevents circular references (e.g., Agent A → Agent B → Agent A):
+
+```json
+{
+  "name": "Agent_B",
+  "type": "agent",
+  "description": "A tool for the agent.",
+  "error": "Circular reference detected"
+}
+```
+
+If a circular reference is detected, the agent is included but without its nested tools, and an `error` field is added.
+
+#### How to Create Nested Agents
+
+1. Create your main agent node
+2. Create a tool node (e.g., "Calculator Agent")
+3. Connect main agent → tool with `HAS_TOOL` relationship
+4. Give the tool node a `HAS_TOOL` relationship to other nodes
+5. Add `system_prompt` property to the tool node (marks it as an agent)
+6. Export the main agent
+
+The frontend will automatically:
+- ✅ Detect that "Calculator Agent" is a nested agent
+- ✅ Mark it as `type: "agent"`
+- ✅ Recursively include its tools
+- ✅ Preserve the hierarchy in the API request
+
+#### Unlimited Nesting Depth
+
+You can nest agents as deeply as needed:
+
+```
+Agent L1
+  └─ Agent L2 (nested)
+      └─ Agent L3 (nested)
+          └─ Tool (regular)
+```
+
+Each level will be properly represented in the hierarchical JSON structure sent to the backend.
+
+---
+
 #### 2. **GET /api/v1/agent/status/{agent_id}**
 
 **Response (In Progress):**
