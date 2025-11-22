@@ -102,6 +102,10 @@ class ChatInterface extends Component {
 
   // Streaming chat handler
   handleStreamingChat = async (message, agentId, threadId, memoryEnabled, apiUrl) => {
+    console.log('🚀 Starting streaming chat...');
+    console.log('📍 URL:', `${apiUrl}/api/v1/chat/stream`);
+    console.log('📦 Payload:', { agent_id: agentId, thread_id: threadId, message, memory_enabled: memoryEnabled });
+
     const response = await fetch(`${apiUrl}/api/v1/chat/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -113,6 +117,8 @@ class ChatInterface extends Component {
       })
     });
 
+    console.log('📡 Response status:', response.status, response.statusText);
+
     if (!response.ok) {
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
@@ -122,10 +128,15 @@ class ChatInterface extends Component {
     const decoder = new TextDecoder();
     let buffer = '';
 
+    console.log('📖 Starting to read stream...');
+
     try {
       while (true) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          console.log('✅ Stream completed');
+          break;
+        }
 
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n');
@@ -133,14 +144,20 @@ class ChatInterface extends Component {
 
         for (const line of lines) {
           if (line.startsWith('data: ')) {
-            const event = JSON.parse(line.slice(6));
-            this.handleStreamEvent(event);
+            console.log('📥 Raw line:', line);
+            try {
+              const event = JSON.parse(line.slice(6));
+              this.handleStreamEvent(event);
+            } catch (parseError) {
+              console.error('❌ Failed to parse event:', line, parseError);
+            }
           }
         }
       }
     } finally {
       reader.releaseLock();
       this.streamReaderRef = null;
+      console.log('🔒 Stream reader released');
     }
   };
 
@@ -182,12 +199,16 @@ class ChatInterface extends Component {
 
   // Handle individual streaming events
   handleStreamEvent = (event) => {
+    console.log('📨 Stream event received:', event.type, event);
+
     switch (event.type) {
       case 'workflow_start':
+        console.log('▶️ Workflow started');
         this.setState({ streamingStatus: 'Agent started...' });
         break;
 
       case 'node_start':
+        console.log('🔵 Node started:', event.node);
         if (event.node === 'agent') {
           this.setState({ streamingStatus: '💭 Agent thinking...' });
         } else if (event.node === 'tools') {
@@ -196,6 +217,7 @@ class ChatInterface extends Component {
         break;
 
       case 'tool_call':
+        console.log('🔧 Tool call:', event.tool_name);
         this.setState(prevState => ({
           streamingTrajectoryItems: [...prevState.streamingTrajectoryItems, {
             id: event.tool_use_id,
@@ -209,6 +231,7 @@ class ChatInterface extends Component {
         break;
 
       case 'tool_result':
+        console.log('✅ Tool result:', event.tool_use_id);
         this.setState(prevState => ({
           streamingTrajectoryItems: prevState.streamingTrajectoryItems.map(item =>
             item.id === event.tool_use_id
@@ -219,6 +242,8 @@ class ChatInterface extends Component {
         break;
 
       case 'response_chunk':
+        console.log('✍️ Response chunk received:', event.content?.substring(0, 100) + '...');
+        console.log('📝 Full event:', event);
         this.setState({
           currentResponse: event.content,
           streamingStatus: '✍️ Generating response...'
@@ -227,6 +252,10 @@ class ChatInterface extends Component {
         break;
 
       case 'workflow_end':
+        console.log('🏁 Workflow end');
+        console.log('📊 Trajectory:', event.trajectory);
+        console.log('📝 Current response in state:', this.state.currentResponse);
+
         const executionTime = Date.now() - this.state.streamStartTime;
 
         // Add final assistant message to history
@@ -239,6 +268,8 @@ class ChatInterface extends Component {
           trajectory_summary: event.trajectory_summary || null
         };
 
+        console.log('💾 Saving message to history:', assistantMessage);
+
         this.setState({
           messages: [...this.state.messages, assistantMessage],
           streaming: false,
@@ -249,6 +280,7 @@ class ChatInterface extends Component {
         break;
 
       case 'error':
+        console.error('❌ Stream error:', event.error);
         this.setState({
           streaming: false,
           streamingStatus: '',
@@ -257,7 +289,7 @@ class ChatInterface extends Component {
         break;
 
       default:
-        console.log('Unknown event type:', event.type, event);
+        console.log('❓ Unknown event type:', event.type, event);
     }
   };
 
