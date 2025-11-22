@@ -12,7 +12,8 @@ class ChatInterface extends Component {
       threadId: this.generateThreadId(props.agentId),
       memoryEnabled: true,
       expandedTrajectories: {}, // Track which message trajectories are expanded
-      expandedToolDetails: {}    // Track which tool details are expanded
+      expandedToolDetails: {},   // Track which tool details are expanded
+      includeTrajectoryInExport: true // Include trajectory in chat export by default
     };
     this.messagesEndRef = React.createRef();
   }
@@ -115,6 +116,64 @@ class ChatInterface extends Component {
       threadId: this.generateThreadId(this.props.agentId),
       error: null
     });
+  };
+
+  handleExportChat = (includeTrajectory) => {
+    const { agentId, agentName } = this.props;
+    const { messages, threadId } = this.state;
+
+    if (messages.length === 0) {
+      alert('No messages to export!');
+      return;
+    }
+
+    // Prepare export data
+    const exportData = {
+      agent_id: agentId,
+      agent_name: agentName || agentId,
+      thread_id: threadId,
+      exported_at: new Date().toISOString(),
+      message_count: messages.length,
+      messages: messages.map(msg => {
+        const exportMsg = {
+          role: msg.role,
+          content: msg.content,
+          timestamp: msg.timestamp
+        };
+
+        // Include execution time for agent messages
+        if (msg.execution_time_ms) {
+          exportMsg.execution_time_ms = msg.execution_time_ms;
+        }
+
+        // Conditionally include trajectory data
+        if (includeTrajectory && msg.trajectory) {
+          exportMsg.trajectory = msg.trajectory;
+          exportMsg.trajectory_summary = msg.trajectory_summary;
+        }
+
+        return exportMsg;
+      })
+    };
+
+    // Create JSON blob
+    const jsonString = JSON.stringify(exportData, null, 2);
+    const blob = new Blob([jsonString], { type: 'application/json' });
+
+    // Generate filename: chat_AgentName_timestamp.json
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    const sanitizedAgentName = (agentName || agentId).replace(/[^a-zA-Z0-9_]/g, '_');
+    const filename = `chat_${sanitizedAgentName}_${timestamp}.json`;
+
+    // Trigger download
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
   };
 
   formatTimestamp = (timestamp) => {
@@ -433,17 +492,48 @@ class ChatInterface extends Component {
             </Button>
           </Form>
 
+          {/* Export Options */}
+          {messages.length > 0 && (
+            <div style={{
+              padding: '10px',
+              backgroundColor: '#f9f9f9',
+              borderRadius: '4px',
+              border: '1px solid #e0e0e0',
+              width: '100%'
+            }}>
+              <Form.Checkbox
+                label='Include reasoning steps in export'
+                checked={this.state.includeTrajectoryInExport}
+                onChange={(e, { checked }) => this.setState({ includeTrajectoryInExport: checked })}
+                style={{ fontSize: '0.9em' }}
+              />
+            </div>
+          )}
+
           {/* Bottom Actions */}
-          <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
-            <Button
-              type="button"
-              onClick={this.handleNewChat}
-              icon
-              labelPosition='left'
-            >
-              <Icon name='refresh' />
-              New Chat
-            </Button>
+          <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <Button
+                type="button"
+                onClick={this.handleNewChat}
+                icon
+                labelPosition='left'
+              >
+                <Icon name='refresh' />
+                New Chat
+              </Button>
+              <Button
+                type="button"
+                onClick={() => this.handleExportChat(this.state.includeTrajectoryInExport)}
+                icon
+                labelPosition='left'
+                disabled={messages.length === 0}
+                color='green'
+              >
+                <Icon name='download' />
+                Export Chat
+              </Button>
+            </div>
             <Button type="button" onClick={onClose}>
               Close
             </Button>
