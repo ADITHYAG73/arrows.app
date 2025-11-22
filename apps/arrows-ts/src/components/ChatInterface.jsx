@@ -27,6 +27,7 @@ class ChatInterface extends Component {
     };
     this.messagesEndRef = React.createRef();
     this.streamReaderRef = null; // Keep reference to abort streaming if needed
+    this.streamingResponseContent = ''; // Instance variable for immediate access (not async like setState)
   }
 
   // Generate thread_id: {agent_id}_{uuid}_{timestamp}
@@ -66,6 +67,8 @@ class ChatInterface extends Component {
       content: message,
       timestamp: new Date().toISOString()
     };
+
+    this.streamingResponseContent = ''; // Reset instance variable
 
     this.setState({
       messages: [...messages, userMessage],
@@ -244,6 +247,11 @@ class ChatInterface extends Component {
       case 'response_chunk':
         console.log('✍️ Response chunk received:', event.content?.substring(0, 100) + '...');
         console.log('📝 Full event:', event);
+
+        // Store in instance variable for immediate access (not async)
+        this.streamingResponseContent = event.content;
+
+        // Also update state for UI
         this.setState({
           currentResponse: event.content,
           streamingStatus: '✍️ Generating response...'
@@ -254,14 +262,15 @@ class ChatInterface extends Component {
       case 'workflow_end':
         console.log('🏁 Workflow end');
         console.log('📊 Trajectory:', event.trajectory);
-        console.log('📝 Current response in state:', this.state.currentResponse);
+        console.log('📝 Response content from instance variable:', this.streamingResponseContent);
 
         const executionTime = Date.now() - this.state.streamStartTime;
 
         // Add final assistant message to history
+        // Use instance variable (immediate, not async) instead of state
         const assistantMessage = {
           role: 'assistant',
-          content: this.state.currentResponse || event.message?.content || '',
+          content: this.streamingResponseContent || event.message?.content || '',
           timestamp: event.timestamp,
           execution_time_ms: event.execution_time_ms || executionTime,
           trajectory: event.trajectory || null,
@@ -269,6 +278,9 @@ class ChatInterface extends Component {
         };
 
         console.log('💾 Saving message to history:', assistantMessage);
+
+        // Clear instance variable
+        this.streamingResponseContent = '';
 
         this.setState({
           messages: [...this.state.messages, assistantMessage],
