@@ -57,7 +57,7 @@ class ChatInterface extends Component {
 
   handleSendMessage = async () => {
     const { message, threadId, memoryEnabled, messages } = this.state;
-    const { agentId, apiUrl } = this.props;
+    const { agentId, apiUrl, isWorkflow } = this.props;
 
     if (!message.trim()) return;
 
@@ -82,22 +82,35 @@ class ChatInterface extends Component {
     });
 
     try {
-      // Try streaming first
-      await this.handleStreamingChat(message, agentId, threadId, memoryEnabled, apiUrl);
+      // Workflow chat uses different endpoint
+      if (isWorkflow) {
+        await this.handleWorkflowChat(message, agentId, threadId, apiUrl);
+      } else {
+        // Try streaming first for agents
+        await this.handleStreamingChat(message, agentId, threadId, memoryEnabled, apiUrl);
+      }
     } catch (error) {
-      console.error('Streaming chat error:', error);
-      console.log('Falling back to regular chat...');
+      console.error('Chat error:', error);
 
-      // Fallback to regular non-streaming chat
-      try {
-        this.setState({ streamingStatus: 'Retrying without streaming...' });
-        await this.handleRegularChat(message, agentId, threadId, memoryEnabled, apiUrl);
-      } catch (fallbackError) {
-        console.error('Regular chat error:', fallbackError);
+      // Fallback to regular non-streaming chat (for agents only)
+      if (!isWorkflow) {
+        console.log('Falling back to regular chat...');
+        try {
+          this.setState({ streamingStatus: 'Retrying without streaming...' });
+          await this.handleRegularChat(message, agentId, threadId, memoryEnabled, apiUrl);
+        } catch (fallbackError) {
+          console.error('Regular chat error:', fallbackError);
+          this.setState({
+            streaming: false,
+            streamingStatus: '',
+            error: fallbackError.message
+          });
+        }
+      } else {
         this.setState({
           streaming: false,
           streamingStatus: '',
-          error: fallbackError.message
+          error: error.message
         });
       }
     }
@@ -191,6 +204,43 @@ class ChatInterface extends Component {
       execution_time_ms: result.execution_time_ms,
       trajectory: result.trajectory || null,
       trajectory_summary: result.trajectory_summary || null
+    };
+
+    this.setState({
+      messages: [...this.state.messages, assistantMessage],
+      streaming: false,
+      streamingStatus: ''
+    });
+  };
+
+  // Workflow chat handler
+  handleWorkflowChat = async (message, workflowId, threadId, apiUrl) => {
+    console.log('🔄 Starting workflow chat...');
+    console.log('📍 URL:', `${apiUrl}/api/v1/workflow/${workflowId}/chat`);
+
+    const response = await fetch(`${apiUrl}/api/v1/workflow/${workflowId}/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: message,
+        thread_id: threadId
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
+    }
+
+    const result = await response.json();
+
+    // Add workflow response to history
+    const assistantMessage = {
+      role: 'assistant',
+      content: result.response,
+      timestamp: new Date().toISOString(),
+      execution_time_ms: result.execution_time_ms || null,
+      execution_id: result.execution_id || null
     };
 
     this.setState({
@@ -529,7 +579,7 @@ class ChatInterface extends Component {
   };
 
   render() {
-    const { open, onClose, agentId, agentName } = this.props;
+    const { open, onClose, agentId, agentName, isWorkflow } = this.props;
     const {
       message,
       messages,
@@ -551,24 +601,26 @@ class ChatInterface extends Component {
         closeIcon
       >
         <Modal.Header>
-          <Icon name='comments' />
+          <Icon name={isWorkflow ? 'sitemap' : 'comments'} />
           Chat with {agentName || agentId}
         </Modal.Header>
 
         <Modal.Content scrolling style={{ minHeight: '500px', maxHeight: '600px' }}>
-          {/* Memory Toggle */}
-          <Message info size='small'>
-            <Form.Checkbox
-              label='Enable conversation memory'
-              checked={memoryEnabled}
-              onChange={(e, { checked }) => this.setState({ memoryEnabled: checked })}
-            />
-            {memoryEnabled && (
-              <p style={{ marginTop: '8px', fontSize: '0.9em' }}>
-                The agent will remember previous messages in this conversation.
-              </p>
-            )}
-          </Message>
+          {/* Memory Toggle (only for agents, not workflows) */}
+          {!isWorkflow && (
+            <Message info size='small'>
+              <Form.Checkbox
+                label='Enable conversation memory'
+                checked={memoryEnabled}
+                onChange={(e, { checked }) => this.setState({ memoryEnabled: checked })}
+              />
+              {memoryEnabled && (
+                <p style={{ marginTop: '8px', fontSize: '0.9em' }}>
+                  The agent will remember previous messages in this conversation.
+                </p>
+              )}
+            </Message>
+          )}
 
           {/* Error Message */}
           {error && (
