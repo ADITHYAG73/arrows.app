@@ -138,6 +138,7 @@ class ExportWorkflowPanel extends Component {
         properties: node.properties || {}
       })),
       relationships: graph.relationships.map(rel => ({
+        id: rel.id,
         fromId: rel.fromId,
         toId: rel.toId,
         type: rel.type || ''
