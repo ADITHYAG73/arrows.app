@@ -28,6 +28,7 @@ class ChatInterface extends Component {
     this.messagesEndRef = React.createRef();
     this.streamReaderRef = null; // Keep reference to abort streaming if needed
     this.streamingResponseContent = ''; // Instance variable for immediate access (not async like setState)
+    this.workflowMetadataCache = {}; // Cache workflow field names (chat_input_field, chat_output_field)
   }
 
   // Generate thread_id: {agent_id}_{uuid}_{timestamp}
@@ -213,41 +214,193 @@ class ChatInterface extends Component {
     });
   };
 
-  // Workflow chat handler
+  // Workflow chat handler with streaming (Two-step process)
   handleWorkflowChat = async (message, workflowId, threadId, apiUrl) => {
-    console.log('🔄 Starting workflow chat...');
-    console.log('📍 URL:', `${apiUrl}/api/v1/workflow/${workflowId}/chat`);
+    console.log('🔄 Starting workflow streaming chat...');
 
-    const response = await fetch(`${apiUrl}/api/v1/workflow/${workflowId}/chat`, {
+    // Step 1: Get workflow metadata (with caching)
+    let metadata = this.workflowMetadataCache[workflowId];
+
+    if (!metadata) {
+      console.log('📋 Fetching workflow metadata from /status...');
+      this.setState({ streamingStatus: 'Loading workflow metadata...' });
+
+      const statusResponse = await fetch(`${apiUrl}/api/v1/workflow/status/${workflowId}`);
+
+      if (!statusResponse.ok) {
+        throw new Error(`Failed to get workflow metadata: ${statusResponse.status}`);
+      }
+
+      const statusData = await statusResponse.json();
+
+      if (statusData.status !== 'ready') {
+        throw new Error(`Workflow not ready (status: ${statusData.status})`);
+      }
+
+      // Cache metadata
+      metadata = {
+        chat_input_field: statusData.chat_input_field,
+        chat_output_field: statusData.chat_output_field
+      };
+      this.workflowMetadataCache[workflowId] = metadata;
+
+      console.log('✅ Metadata cached:', metadata);
+    } else {
+      console.log('📋 Using cached metadata:', metadata);
+    }
+
+    // Step 2: Stream execution with dynamic field names
+    console.log('📍 URL:', `${apiUrl}/api/v1/workflow/${workflowId}/execute/stream`);
+
+    const requestBody = {
+      input: {
+        [metadata.chat_input_field]: message  // Dynamic field name
+      },
+      thread_id: threadId,
+      config: {
+        memory_enabled: this.state.memoryEnabled
+      }
+    };
+
+    console.log('📦 Request body:', requestBody);
+
+    const response = await fetch(`${apiUrl}/api/v1/workflow/${workflowId}/execute/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        message: message,
-        thread_id: threadId
-      })
+      body: JSON.stringify(requestBody)
     });
+
+    console.log('📡 Response status:', response.status, response.statusText);
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
       throw new Error(errorData.detail || `HTTP error! status: ${response.status}`);
     }
 
-    const result = await response.json();
+    const reader = response.body.getReader();
+    this.streamReaderRef = reader;
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-    // Add workflow response to history
-    const assistantMessage = {
-      role: 'assistant',
-      content: result.response,
-      timestamp: new Date().toISOString(),
-      execution_time_ms: result.execution_time_ms || null,
-      execution_id: result.execution_id || null
-    };
+    console.log('📖 Starting to read workflow stream...');
 
-    this.setState({
-      messages: [...this.state.messages, assistantMessage],
-      streaming: false,
-      streamingStatus: ''
-    });
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log('✅ Workflow stream completed');
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            console.log('📥 Raw workflow event:', line);
+            try {
+              const event = JSON.parse(line.slice(6));
+              this.handleWorkflowStreamEvent(event, metadata);
+            } catch (parseError) {
+              console.error('❌ Failed to parse workflow event:', line, parseError);
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+      this.streamReaderRef = null;
+      console.log('🔒 Workflow stream reader released');
+    }
+  };
+
+  // Handle workflow streaming events (All 7 event types)
+  handleWorkflowStreamEvent = (event, metadata) => {
+    console.log('📨 Workflow stream event received:', event.type, event);
+
+    switch (event.type) {
+      case 'workflow_start':
+        console.log('▶️ Workflow started:', event.execution_id);
+        this.setState({ streamingStatus: 'Workflow started...' });
+        break;
+
+      case 'node_start':
+        console.log('🔵 Workflow node started:', event.node);
+        this.setState({ streamingStatus: `Processing: ${event.node}...` });
+        break;
+
+      case 'token':
+        // Token streaming from workflow nodes - accumulate for real-time display
+        console.log('✍️ Token chunk received:', event.content?.substring(0, 100));
+        this.streamingResponseContent += event.content || '';
+        this.setState({
+          currentResponse: this.streamingResponseContent,
+          streamingStatus: '✍️ Generating response...'
+        });
+        this.scrollToBottom();
+        break;
+
+      case 'node_end':
+        console.log('🟢 Workflow node completed:', event.node, `(${event.duration_ms}ms)`);
+        break;
+
+      case 'state_update':
+        console.log('🔄 State updated at step:', event.step);
+        // Can be used for progress indicators
+        break;
+
+      case 'error':
+        console.error('❌ Workflow stream error:', event.error);
+        this.setState({
+          streaming: false,
+          streamingStatus: '',
+          error: event.error
+        });
+        break;
+
+      case 'workflow_end':
+        console.log('🏁 Workflow execution complete');
+        console.log('📊 Final state:', event.final_state);
+        console.log('📝 Output field:', event.chat_output_field);
+        console.log('🔍 Trajectory data:', event.trajectory);
+
+        const executionTime = Date.now() - this.state.streamStartTime;
+
+        // Extract final answer using chat_output_field from event or metadata
+        const outputField = event.chat_output_field || metadata?.chat_output_field;
+        const finalAnswer = event.final_state?.[outputField] || this.streamingResponseContent || '';
+
+        console.log('✅ Final answer extracted from field:', outputField, '→', finalAnswer.substring(0, 100));
+
+        // Add final assistant message to history
+        const assistantMessage = {
+          role: 'assistant',
+          content: finalAnswer,
+          timestamp: event.timestamp || new Date().toISOString(),
+          execution_time_ms: event.execution_time_ms || executionTime,
+          execution_id: event.execution_id || null,
+          trajectory: event.trajectory || null,
+          trajectory_summary: event.trajectory_summary || event.trajectory?.summary || null
+        };
+
+        console.log('💾 Saving workflow message to history:', assistantMessage);
+
+        // Clear instance variable
+        this.streamingResponseContent = '';
+
+        this.setState({
+          messages: [...this.state.messages, assistantMessage],
+          streaming: false,
+          streamingStatus: '',
+          currentResponse: '',
+          streamingTrajectoryItems: []
+        });
+        break;
+
+      default:
+        console.log('❓ Unknown workflow event type:', event.type, event);
+    }
   };
 
   // Handle individual streaming events
@@ -578,6 +731,150 @@ class ChatInterface extends Component {
     );
   };
 
+  // Render workflow trajectory (different format from agent trajectory)
+  renderWorkflowTrajectory = (trajectory, messageIndex) => {
+    const { execution_path, node_details, summary } = trajectory;
+
+    return (
+      <div>
+        {/* Summary Section */}
+        {summary && (
+          <div style={{
+            padding: '10px',
+            marginBottom: '12px',
+            backgroundColor: '#e8f5e9',
+            borderRadius: '4px',
+            borderLeft: '3px solid #4caf50'
+          }}>
+            <strong style={{ fontSize: '0.9em', color: '#2e7d32' }}>Summary</strong>
+            <div style={{ marginTop: '6px', fontSize: '0.9em', color: '#555' }}>
+              <div>📊 Total Steps: <strong>{summary.total_steps}</strong></div>
+              <div>⏱️ Duration: <strong>{Math.round(summary.total_duration_ms)}ms</strong></div>
+              <div>🔧 Nodes Executed: <strong>{summary.nodes_executed?.join(', ')}</strong></div>
+              {summary.total_tokens > 0 && <div>🪙 Tokens: <strong>{summary.total_tokens}</strong></div>}
+            </div>
+          </div>
+        )}
+
+        {/* Execution Path */}
+        {execution_path && execution_path.length > 0 && (
+          <div style={{ marginBottom: '12px' }}>
+            <strong style={{ fontSize: '0.9em', color: '#555' }}>Execution Path:</strong>
+            {execution_path.map((step, idx) => (
+              <div
+                key={idx}
+                style={{
+                  padding: '8px',
+                  marginTop: '6px',
+                  backgroundColor: step.status === 'completed' ? '#e3f2fd' : '#ffebee',
+                  borderRadius: '4px',
+                  borderLeft: `3px solid ${step.status === 'completed' ? '#2196f3' : '#f44336'}`
+                }}
+              >
+                <div style={{ fontSize: '0.9em' }}>
+                  <Icon name={step.status === 'completed' ? 'check circle' : 'times circle'}
+                        style={{ color: step.status === 'completed' ? '#2196f3' : '#f44336' }} />
+                  <strong>Step {step.step}:</strong> {step.node}
+                  <span style={{ marginLeft: '8px', color: '#666' }}>
+                    ({Math.round(step.duration_ms)}ms)
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Node Details */}
+        {node_details && node_details.length > 0 && (
+          <div>
+            <strong style={{ fontSize: '0.9em', color: '#555' }}>Node Details:</strong>
+            {node_details.map((node, idx) => {
+              const stepKey = `${messageIndex}-node-${idx}`;
+              const isExpanded = this.state.expandedToolDetails[stepKey];
+
+              return (
+                <div
+                  key={idx}
+                  style={{
+                    padding: '10px',
+                    marginTop: '6px',
+                    backgroundColor: '#fff3e0',
+                    borderRadius: '4px',
+                    borderLeft: '3px solid #ff9800'
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                    <Icon name='cog' style={{ color: '#ff9800' }} />
+                    <div style={{ flex: 1 }}>
+                      <strong style={{ fontSize: '0.9em' }}>{node.node}</strong>
+                      <div style={{ fontSize: '0.85em', color: '#666', marginTop: '2px' }}>
+                        Duration: {Math.round(node.duration_ms)}ms
+                        {node.tokens_generated && ` | Tokens: ${node.tokens_generated}`}
+                        {node.error && <span style={{ color: '#f44336' }}> | Error: {node.error}</span>}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Expandable Input/Output */}
+                  <div style={{ marginTop: '8px' }}>
+                    <Button
+                      type="button"
+                      size="mini"
+                      basic
+                      compact
+                      onClick={() => this.toggleToolDetails(stepKey)}
+                      style={{ padding: '4px 8px', fontSize: '0.85em' }}
+                    >
+                      <Icon name={isExpanded ? 'chevron up' : 'chevron down'} />
+                      {isExpanded ? 'Hide' : 'Show'} input/output
+                    </Button>
+
+                    {isExpanded && (
+                      <div style={{ marginTop: '8px' }}>
+                        {node.input && (
+                          <div style={{ marginBottom: '8px' }}>
+                            <strong style={{ fontSize: '0.85em' }}>Input:</strong>
+                            <pre style={{
+                              backgroundColor: '#fff',
+                              padding: '8px',
+                              borderRadius: '3px',
+                              fontSize: '0.85em',
+                              margin: '4px 0 0 0',
+                              overflow: 'auto',
+                              maxHeight: '200px'
+                            }}>
+                              {JSON.stringify(node.input, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                        {node.output && (
+                          <div>
+                            <strong style={{ fontSize: '0.85em' }}>Output:</strong>
+                            <pre style={{
+                              backgroundColor: '#fff',
+                              padding: '8px',
+                              borderRadius: '3px',
+                              fontSize: '0.85em',
+                              margin: '4px 0 0 0',
+                              overflow: 'auto',
+                              maxHeight: '200px'
+                            }}>
+                              {JSON.stringify(node.output, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   render() {
     const { open, onClose, agentId, agentName, isWorkflow } = this.props;
     const {
@@ -606,21 +903,21 @@ class ChatInterface extends Component {
         </Modal.Header>
 
         <Modal.Content scrolling style={{ minHeight: '500px', maxHeight: '600px' }}>
-          {/* Memory Toggle (only for agents, not workflows) */}
-          {!isWorkflow && (
-            <Message info size='small'>
-              <Form.Checkbox
-                label='Enable conversation memory'
-                checked={memoryEnabled}
-                onChange={(e, { checked }) => this.setState({ memoryEnabled: checked })}
-              />
-              {memoryEnabled && (
-                <p style={{ marginTop: '8px', fontSize: '0.9em' }}>
-                  The agent will remember previous messages in this conversation.
-                </p>
-              )}
-            </Message>
-          )}
+          {/* Memory Toggle (for both agents and workflows) */}
+          <Message info size='small'>
+            <Form.Checkbox
+              label='Enable conversation memory'
+              checked={memoryEnabled}
+              onChange={(e, { checked }) => this.setState({ memoryEnabled: checked })}
+            />
+            {memoryEnabled && (
+              <p style={{ marginTop: '8px', fontSize: '0.9em' }}>
+                {isWorkflow
+                  ? 'The workflow will remember previous messages in this conversation.'
+                  : 'The agent will remember previous messages in this conversation.'}
+              </p>
+            )}
+          </Message>
 
           {/* Error Message */}
           {error && (
@@ -692,7 +989,7 @@ class ChatInterface extends Component {
                       </Comment.Text>
 
                       {/* Trajectory Section */}
-                      {msg.trajectory && msg.trajectory.length > 0 && (
+                      {msg.trajectory && (Array.isArray(msg.trajectory) ? msg.trajectory.length > 0 : true) && (
                         <div style={{ marginTop: '12px' }}>
                           <Button
                             type="button"
@@ -705,8 +1002,9 @@ class ChatInterface extends Component {
                             style={{ marginBottom: '8px' }}
                           >
                             <Icon name={isTrajectoryExpanded ? 'chevron up' : 'chevron down'} />
-                            {isTrajectoryExpanded ? 'Hide' : 'Show'} reasoning
+                            {isTrajectoryExpanded ? 'Hide' : 'Show'} execution details
                             {hasSummary && ` (${msg.trajectory_summary.tool_calls} tool calls, ${msg.trajectory_summary.total_steps} steps)`}
+                            {msg.trajectory.summary && ` (${msg.trajectory.summary.total_steps} steps, ${msg.trajectory.summary.total_duration_ms}ms)`}
                           </Button>
 
                           {isTrajectoryExpanded && (
@@ -718,9 +1016,12 @@ class ChatInterface extends Component {
                               border: '1px solid #e0e0e0'
                             }}>
                               <div style={{ marginBottom: '8px', fontSize: '0.9em', color: '#666' }}>
-                                <strong>Agent Reasoning Process:</strong>
+                                <strong>{Array.isArray(msg.trajectory) ? 'Agent Reasoning Process:' : 'Workflow Execution Details:'}</strong>
                               </div>
-                              {msg.trajectory.map(step => this.renderTrajectoryStep(step, index))}
+                              {Array.isArray(msg.trajectory)
+                                ? msg.trajectory.map(step => this.renderTrajectoryStep(step, index))
+                                : this.renderWorkflowTrajectory(msg.trajectory, index)
+                              }
                             </div>
                           )}
                         </div>

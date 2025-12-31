@@ -32,6 +32,35 @@ class ExportWorkflowPanel extends Component {
     }
   }
 
+  // Sanitize node name to match backend's sanitize_node_name() function
+  // Follows exact rules from backend Python implementation
+  sanitizeNodeName = (name) => {
+    if (!name) {
+      return 'unnamed_node';
+    }
+
+    // Step 1: Replace all spaces with underscores
+    let sanitized = name.replace(/ /g, '_');
+
+    // Step 2: Replace ANY character that's NOT a letter, number, or underscore
+    // Using explicit character class to match Python's \w behavior (ASCII-only)
+    sanitized = sanitized.replace(/[^a-zA-Z0-9_]/g, '_');
+
+    // Step 3: Replace consecutive underscores with single underscore
+    sanitized = sanitized.replace(/_+/g, '_');
+
+    // Step 4: Remove leading and trailing underscores
+    sanitized = sanitized.replace(/^_+|_+$/g, '');
+
+    // Step 5: If starts with digit, prepend "node_"
+    if (sanitized && /^\d/.test(sanitized)) {
+      sanitized = `node_${sanitized}`;
+    }
+
+    // Step 6: If empty after all processing, return fallback
+    return sanitized || 'unnamed_node';
+  };
+
   // Start polling workflow status
   startPolling = (workflowId) => {
     this.setState({ polling: true });
@@ -134,7 +163,7 @@ class ExportWorkflowPanel extends Component {
     const graphExport = {
       nodes: graph.nodes.map(node => ({
         id: node.id,
-        caption: node.caption,
+        caption: this.sanitizeNodeName(node.caption), // Sanitize node captions
         properties: node.properties || {}
       })),
       relationships: graph.relationships.map(rel => ({

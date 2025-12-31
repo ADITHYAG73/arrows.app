@@ -37,6 +37,35 @@ class ExportAgentFrameworkPanel extends Component {
     }
   }
 
+  // Sanitize node name to match backend's sanitize_node_name() function
+  // Follows exact rules from backend Python implementation
+  sanitizeNodeName = (name) => {
+    if (!name) {
+      return 'unnamed_node';
+    }
+
+    // Step 1: Replace all spaces with underscores
+    let sanitized = name.replace(/ /g, '_');
+
+    // Step 2: Replace ANY character that's NOT a letter, number, or underscore
+    // Using explicit character class to match Python's \w behavior (ASCII-only)
+    sanitized = sanitized.replace(/[^a-zA-Z0-9_]/g, '_');
+
+    // Step 3: Replace consecutive underscores with single underscore
+    sanitized = sanitized.replace(/_+/g, '_');
+
+    // Step 4: Remove leading and trailing underscores
+    sanitized = sanitized.replace(/^_+|_+$/g, '');
+
+    // Step 5: If starts with digit, prepend "node_"
+    if (sanitized && /^\d/.test(sanitized)) {
+      sanitized = `node_${sanitized}`;
+    }
+
+    // Step 6: If empty after all processing, return fallback
+    return sanitized || 'unnamed_node';
+  };
+
   // Detect nodes that have HAS_TOOL relationships (case-sensitive)
   detectAgentNodes = () => {
     const { graph } = this.props;
@@ -81,7 +110,7 @@ class ExportAgentFrameworkPanel extends Component {
     if (visitedNodes.has(toolNode.id)) {
       console.warn(`Circular reference detected for node ${toolNode.id}, skipping nested tools`);
       return {
-        name: (toolNode.caption || `tool_${toolNode.id}`).replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '_'),
+        name: this.sanitizeNodeName(toolNode.caption || `tool_${toolNode.id}`),
         description: toolNode.properties?.description || 'A tool for the agent.',
         type: 'agent',
         error: 'Circular reference detected'
@@ -95,10 +124,8 @@ class ExportAgentFrameworkPanel extends Component {
     // Extract properties
     const { description, system_prompt, ...config } = toolNode.properties || {};
 
-    // Sanitize tool name
-    const sanitizedToolName = (toolNode.caption || `tool_${toolNode.id}`)
-      .replace(/\s+/g, '_')
-      .replace(/[^a-zA-Z0-9_]/g, '_');
+    // Sanitize tool name using backend-compatible function
+    const sanitizedToolName = this.sanitizeNodeName(toolNode.caption || `tool_${toolNode.id}`);
 
     // Check if this tool is actually an agent (has its own tools)
     const isAgent = this.isNodeAnAgent(toolNode.id);
@@ -130,10 +157,8 @@ class ExportAgentFrameworkPanel extends Component {
 
   // Transform agent node + tool nodes to API format
   transformToAPIFormat = (agentNode, toolNodes) => {
-    // Sanitize node_label: replace spaces and special chars with underscores
-    const sanitizedLabel = (agentNode.caption || `agent_${agentNode.id}`)
-      .replace(/\s+/g, '_')
-      .replace(/[^a-zA-Z0-9_]/g, '_');
+    // Sanitize node_label using backend-compatible function
+    const sanitizedLabel = this.sanitizeNodeName(agentNode.caption || `agent_${agentNode.id}`);
 
     return {
       node_label: sanitizedLabel,
