@@ -8,6 +8,7 @@ import ExportGraphQLPanel from "./ExportGraphQLPanel";
 import {loadFavoriteExportTab, saveFavoriteExportTab} from "../actions/localStorage";
 import ExportUrlPanel from "./ExportUrlPanel";
 import ExportAgentFrameworkPanel from "./ExportAgentFrameworkPanel";
+import ExportWorkflowPanel from "./ExportWorkflowPanel";
 
 class ExportModal extends Component {
 
@@ -101,6 +102,17 @@ class ExportModal extends Component {
         render: () => (
           <Tab.Pane attached={false}>
             <ExportAgentFrameworkPanel
+              graph={this.props.graph}
+              diagramName={this.props.diagramName}
+            />
+          </Tab.Pane>
+        ),
+      },
+      {
+        menuItem: 'Workflow',
+        render: () => (
+          <Tab.Pane attached={false}>
+            <ExportWorkflowPanel
               graph={this.props.graph}
               diagramName={this.props.diagramName}
             />
